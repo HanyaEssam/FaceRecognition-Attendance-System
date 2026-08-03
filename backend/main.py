@@ -24,15 +24,24 @@ from pydantic import BaseModel
 
 from db import (init_db, get_all_employees, log_check_in, log_check_out,
                  get_attendance_df, add_employee, delete_employee,
-                 update_employee_profile, log_visitor, get_visitors_df,
-                 get_visitor_count_this_month, get_today_summary)
+                 update_employee_profile, get_visitors_df,
+                 get_visitor_count_this_month, get_today_summary,
+                 get_open_visitor_sessions, log_visitor_check_in, log_visitor_check_out)
 from face_pipeline import FacePipeline, LivenessChecker, detect_mask
 
 app = FastAPI(title="Attendance API")
 
+# Add your deployed frontend URL here via the FRONTEND_URL env var
+# (e.g. FRONTEND_URL=https://your-app.vercel.app), or it falls back to
+# just the local Vite dev server for local development.
+_extra_origin = os.environ.get("FRONTEND_URL")
+_allow_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+if _extra_origin:
+    _allow_origins.append(_extra_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Vite dev server
+    allow_origins=_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,7 +89,6 @@ class EmployeeCreate(BaseModel):
     name: str
     department: str
     shift_start: str = "09:00"
-    shift_end: str = "17:00"
     images: List[str]  # list of base64 data URLs, averaged into one embedding
     national_id: Optional[str] = None
     job_title: Optional[str] = None
@@ -95,7 +103,6 @@ class EmployeeProfileUpdate(BaseModel):
     name: Optional[str] = None
     department: Optional[str] = None
     shift_start: Optional[str] = None
-    shift_end: Optional[str] = None
     national_id: Optional[str] = None
     job_title: Optional[str] = None
     gender: Optional[str] = None
@@ -136,7 +143,7 @@ def create_employee(payload: EmployeeCreate):
 
     avg_embedding = np.mean(embeddings, axis=0)
     add_employee(
-        payload.name, payload.department, avg_embedding, shift_start=payload.shift_start,shift_end=payload.shift_end,
+        payload.name, payload.department, avg_embedding, shift_start=payload.shift_start,
         national_id=payload.national_id, job_title=payload.job_title, gender=payload.gender,
         religion=payload.religion, marital_status=payload.marital_status,
         birth_date=payload.birth_date, address=payload.address,
@@ -184,33 +191,47 @@ def checkin(payload: CheckInRequest):
             "liveness_details": live_details,
         }
 
-    employees = get_all_employees()
-    if not employees:
-        log_visitor(camera=payload.camera, best_similarity=None)
-        return {"result": "visitor", "message": "No employees enrolled yet — logged as a visitor."}
-
     embedding = pipeline.get_embedding(frame, face_row)
-    match, score = pipeline.match(embedding, employees)
+    employees = get_all_employees()
+    match, score = pipeline.match(embedding, employees) if employees else (None, 0.0)
 
-    if match is None:
-        log_visitor(camera=payload.camera, best_similarity=float(score))
-        return {"result": "visitor", "message": f"Not a recognized employee — logged as a visitor (similarity {score:.2f}).",
-                "similarity": float(score)}
+    if match is not None:
+        # --- Recognized employee: unchanged from before ---
+        wearing_mask, mask_score = detect_mask(frame, face_row)
+        if payload.action == "check_in":
+            status = log_check_in(match["id"], match["shift_start"], wore_mask=wearing_mask)
+            return {
+                "result": "check_in", "status": status, "employee_name": match["name"],
+                "similarity": float(score), "liveness_score": live_score, "wore_mask": wearing_mask,
+            }
+        else:
+            status = log_check_out(match["id"])
+            return {
+                "result": "check_out", "status": status, "employee_name": match["name"],
+                "similarity": float(score),
+            }
 
-    wearing_mask, mask_score = detect_mask(frame, face_row)
+    # --- Not a recognized employee: handle as a VISITOR SESSION ---
+    # Match against currently-open visitor sessions (people who checked in
+    # as guests earlier and haven't checked out yet) using the exact same
+    # matching function as employees -- just against a temporary pool.
+    open_sessions = get_open_visitor_sessions()
+    visitor_match, visitor_score = pipeline.match(embedding, open_sessions) if open_sessions else (None, 0.0)
 
     if payload.action == "check_in":
-        status = log_check_in(match["id"], match["shift_start"], wore_mask=wearing_mask)
-        return {
-            "result": "check_in", "status": status, "employee_name": match["name"],
-            "similarity": float(score), "liveness_score": live_score, "wore_mask": wearing_mask,
-        }
+        if visitor_match is not None:
+            return {"result": "visitor_already_checked_in",
+                    "message": "This visitor is already checked in (no new session created)."}
+        log_visitor_check_in(embedding, camera=payload.camera, best_similarity=float(score))
+        return {"result": "visitor_check_in", "message": "Visitor checked in.",
+                "similarity_to_employees": float(score)}
     else:
-        status = log_check_out(match["id"])
-        return {
-            "result": "check_out", "status": status, "employee_name": match["name"],
-            "similarity": float(score),
-        }
+        if visitor_match is None:
+            return {"result": "visitor_no_session",
+                    "message": "No matching visitor check-in found to check out."}
+        duration = log_visitor_check_out(visitor_match["id"], camera=payload.camera)
+        return {"result": "visitor_check_out", "message": f"Visitor checked out after {duration} minutes.",
+                "duration_minutes": duration}
 
 
 # ---------------------------------------------------------------------
@@ -326,8 +347,3 @@ def dashboard_stats():
 @app.get("/api/health")
 def health():
     return {"status": "ok", "models_loaded": MODELS_LOADED}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)

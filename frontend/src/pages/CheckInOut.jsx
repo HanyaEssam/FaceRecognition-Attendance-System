@@ -1,7 +1,6 @@
 import { useRef, useState } from "react";
 import WebcamCapture from "../components/WebcamCapture";
 import { checkIn } from "../api";
-import { Camera, CheckCircle2, AlertTriangle, Info, XCircle } from "lucide-react";
 
 function CheckInOut() {
   const camRef = useRef(null);
@@ -16,7 +15,8 @@ function CheckInOut() {
     setBusy(true);
     setResult(null);
     try {
-      const data = await checkIn({ image, action, camera: "main gate in" });
+      const camera = action === "check_in" ? "main gate in" : "main gate out";
+      const data = await checkIn({ image, action, camera });
       setResult(data);
     } catch (err) {
       setResult({ result: "error", message: err.response?.data?.detail || err.message });
@@ -29,22 +29,17 @@ function CheckInOut() {
     if (!r) return "";
     if (r.result === "check_in") return r.status === "on_time" ? "alert-success" : "alert-warning";
     if (r.result === "check_out") return "alert-success";
-    if (r.result === "visitor") return "alert-info";
+    if (r.result === "visitor_check_in") return "alert-info";
+    if (r.result === "visitor_check_out") return "alert-success";
+    if (r.result === "visitor_already_checked_in") return "alert-info";
+    if (r.result === "visitor_no_session") return "alert-warning";
     if (r.result === "no_face") return "alert-warning";
     return "alert-danger";
   };
 
-  const alertIcon = (r) => {
-    const cls = alertClass(r);
-    if (cls === "alert-success") return <CheckCircle2 size={16} />;
-    if (cls === "alert-warning") return <AlertTriangle size={16} />;
-    if (cls === "alert-info") return <Info size={16} />;
-    return <XCircle size={16} />;
-  };
-
   return (
     <div className="checkin-layout">
-      <div className="checkin-panel">
+      <div>
         <WebcamCapture ref={camRef} />
         <div className="action-row">
           <label>
@@ -57,14 +52,13 @@ function CheckInOut() {
           </label>
         </div>
         <button className="btn-primary" onClick={handleCapture} disabled={busy}>
-          <Camera size={16} /> {busy ? "Processing…" : "Capture & Submit"}
+          {busy ? "Processing…" : "Capture & Submit"}
         </button>
       </div>
 
-      <div className="checkin-panel">
+      <div>
         {result && (
           <div className={`alert ${alertClass(result)}`}>
-            {alertIcon(result)}
             {result.message ||
               (result.result === "check_in" && `${result.employee_name} checked in — ${result.status}`) ||
               (result.result === "check_out" && `${result.employee_name} checked out`)}
@@ -74,18 +68,11 @@ function CheckInOut() {
         {result?.liveness_details && showDebug && (
           <div className="debug-box">
             <div className="debug-box-header">
-              <span>Liveness debug</span>
+              <strong>Liveness debug</strong>
               <button className="btn-link" onClick={() => setShowDebug(false)}>hide</button>
             </div>
             <pre>{JSON.stringify(result.liveness_details, null, 2)}</pre>
           </div>
-        )}
-
-        {!result && (
-          <p className="hint" style={{ marginTop: 0 }}>
-            <Info size={15} />
-            Capture a frame from the camera to check in or out. Results and liveness details appear here.
-          </p>
         )}
       </div>
     </div>
