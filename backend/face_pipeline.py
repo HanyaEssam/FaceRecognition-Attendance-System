@@ -1,18 +1,21 @@
 import cv2
 import numpy as np
-
+from pathlib import Path
 SFACE_COSINE_THRESHOLD = 0.363
 
 
 class FacePipeline:
     def __init__(self,
-                 detector_path="models/face_detection_yunet.onnx",
-                 recognizer_path="models/face_recognition_sface.onnx",
                  score_threshold=0.9):
+        BASE_DIR = Path(__file__).resolve().parent
+        MODELS_DIR = BASE_DIR / "models"
+        YUNET_MODEL_PATH = MODELS_DIR / "face_detection_yunet.onnx"
+        SFACE_MODEL_PATH = MODELS_DIR / "face_recognition_sface.onnx"
         self.detector = cv2.FaceDetectorYN_create(
-            detector_path, "", (320, 320), score_threshold, 0.3, 5000
+            YUNET_MODEL_PATH, "", (320, 320), score_threshold, 0.3, 5000
         )
-        self.recognizer = cv2.FaceRecognizerSF_create(recognizer_path, "")
+        self.recognizer = cv2.FaceRecognizerSF_create(SFACE_MODEL_PATH, "")
+        
 
     def detect_faces(self, frame):
         h, w = frame.shape[:2]

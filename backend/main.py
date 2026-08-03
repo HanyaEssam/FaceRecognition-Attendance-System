@@ -17,11 +17,12 @@ from typing import Optional, List
 import cv2
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
+from dotenv import load_dotenv
+load_dotenv()
 from db import (init_db, get_all_employees, log_check_in, log_check_out,
                  get_attendance_df, add_employee, delete_employee,
                  update_employee_profile, get_visitors_df,
@@ -30,6 +31,7 @@ from db import (init_db, get_all_employees, log_check_in, log_check_out,
 from face_pipeline import FacePipeline, LivenessChecker, detect_mask
 
 app = FastAPI(title="Attendance API")
+router = APIRouter(prefix="/api")
 
 # Add your deployed frontend URL here via the FRONTEND_URL env var
 # (e.g. FRONTEND_URL=https://your-app.vercel.app), or it falls back to
@@ -116,14 +118,14 @@ class EmployeeProfileUpdate(BaseModel):
 # ---------------------------------------------------------------------
 # Employees
 # ---------------------------------------------------------------------
-@app.get("/api/employees")
+@router.get("/employees")
 def list_employees():
     employees = get_all_employees()
     # embeddings are large numpy arrays -- don't send them over the wire
     return [{k: v for k, v in e.items() if k != "embedding"} for e in employees]
 
 
-@app.post("/api/employees")
+@router.post("/employees")
 def create_employee(payload: EmployeeCreate):
     if not MODELS_LOADED:
         raise HTTPException(status_code=503, detail="Face models not loaded on the server.")
@@ -151,7 +153,7 @@ def create_employee(payload: EmployeeCreate):
     return {"status": "created", "captures_used": len(embeddings)}
 
 
-@app.put("/api/employees/{employee_id}")
+@router.put("/employees/{employee_id}")
 def edit_employee(employee_id: int, payload: EmployeeProfileUpdate):
     fields = {k: v for k, v in payload.dict().items() if v is not None}
     if not fields:
@@ -160,7 +162,7 @@ def edit_employee(employee_id: int, payload: EmployeeProfileUpdate):
     return {"status": "updated"}
 
 
-@app.delete("/api/employees/{employee_id}")
+@router.delete("/employees/{employee_id}")
 def remove_employee(employee_id: int):
     delete_employee(employee_id)
     return {"status": "deleted"}
@@ -223,7 +225,7 @@ def _process_one_face(frame, face_row, action, camera):
                 "duration_minutes": duration}
 
 
-@app.post("/api/checkin")
+@router.post("/checkin")
 def checkin(payload: CheckInRequest):
     if not MODELS_LOADED:
         raise HTTPException(status_code=503, detail="Face models not loaded on the server.")
@@ -243,7 +245,7 @@ def checkin(payload: CheckInRequest):
 # ---------------------------------------------------------------------
 # Attendance
 # ---------------------------------------------------------------------
-@app.get("/api/attendance")
+@router.get("/attendance")
 def attendance(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -270,7 +272,7 @@ def attendance(
     return df.to_dict(orient="records")
 
 
-@app.get("/api/attendance/export/csv")
+@router.get("/attendance/export/csv")
 def export_csv():
     df = get_attendance_df()
     buf = io.StringIO()
@@ -282,7 +284,7 @@ def export_csv():
     )
 
 
-@app.get("/api/attendance/export/xlsx")
+@router.get("/attendance/export/xlsx")
 def export_xlsx():
     df = get_attendance_df()
     buf = io.BytesIO()
@@ -298,7 +300,7 @@ def export_xlsx():
 # ---------------------------------------------------------------------
 # Visitors
 # ---------------------------------------------------------------------
-@app.get("/api/visitors")
+@router.get("/visitors")
 def visitors():
     df = get_visitors_df()
     df = df.astype(object).where(df.notnull(), None)
@@ -312,7 +314,7 @@ def visitors():
 # ---------------------------------------------------------------------
 # Dashboard stats
 # ---------------------------------------------------------------------
-@app.get("/api/dashboard/stats")
+@router.get("/dashboard/stats")
 def dashboard_stats():
     df = get_attendance_df()
     total_employees, attended_today, absent_today = get_today_summary()
@@ -350,6 +352,18 @@ def dashboard_stats():
     return stats
 
 
-@app.get("/api/health")
+@router.get("/health")
 def health():
     return {"status": "ok", "models_loaded": MODELS_LOADED}
+
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "message": "Face Recognition Attendance API is running",
+        "docs": "/docs",
+        "health": "/api/health",
+    }
+
+
+app.include_router(router)
