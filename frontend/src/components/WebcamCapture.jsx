@@ -46,7 +46,7 @@ const WebcamCapture = forwardRef(function WebcamCapture(_props, ref) {
   return (
     <div className="webcam-frame">
       <div className="webcam-wrap">
-        <video ref={videoRef} autoPlay playsInline muted className="webcam-video" />
+        <video ref={videoRef} autoPlay playsInline muted className="webcam-video" style={{transform: "scaleX(-1)"}}/>
         <canvas ref={canvasRef} style={{ display: "none" }} />
         {!ready && <p style={{ color: "#C7CDD8", padding: "12px 14px", margin: 0 }}>Requesting camera access…</p>}
       </div>
