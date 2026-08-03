@@ -169,6 +169,60 @@ def remove_employee(employee_id: int):
 # ---------------------------------------------------------------------
 # Check In / Out
 # ---------------------------------------------------------------------
+def _process_one_face(frame, face_row, action, camera):
+    """Runs the full liveness -> match -> log pipeline for ONE detected
+    face and returns a result dict. Used to process every face found in
+    a frame, so a single photo with multiple people checks everyone in."""
+    box = face_row[:4].astype(int).tolist()
+    is_live, live_score, live_details = liveness.is_live(frame, face_row, debug=False)
+
+    if not is_live:
+        return {
+            "result": "spoof_suspected", "box": box,
+            "message": f"Liveness check failed (score {live_score:.2f}). This looks like a photo or screen.",
+            "liveness_score": live_score, "liveness_details": live_details,
+        }
+
+    embedding = pipeline.get_embedding(frame, face_row)
+    employees = get_all_employees()
+    match, score = pipeline.match(embedding, employees) if employees else (None, 0.0)
+
+    if match is not None:
+        wearing_mask, mask_score = detect_mask(frame, face_row)
+        if action == "check_in":
+            status = log_check_in(match["id"], match["shift_start"], wore_mask=wearing_mask)
+            return {
+                "result": "check_in", "box": box, "status": status, "employee_name": match["name"],
+                "similarity": float(score), "liveness_score": live_score, "wore_mask": wearing_mask,
+            }
+        else:
+            status = log_check_out(match["id"])
+            return {
+                "result": "check_out", "box": box, "status": status, "employee_name": match["name"],
+                "similarity": float(score),
+            }
+
+    # --- Not a recognized employee: handle as a VISITOR SESSION ---
+    open_sessions = get_open_visitor_sessions()
+    visitor_match, visitor_score = pipeline.match(embedding, open_sessions) if open_sessions else (None, 0.0)
+
+    if action == "check_in":
+        if visitor_match is not None:
+            return {"result": "visitor_already_checked_in", "box": box,
+                    "message": "This visitor is already checked in (no new session created)."}
+        log_visitor_check_in(embedding, camera=camera, best_similarity=float(score))
+        return {"result": "visitor_check_in", "box": box, "message": "Visitor checked in.",
+                "similarity_to_employees": float(score)}
+    else:
+        if visitor_match is None:
+            return {"result": "visitor_no_session", "box": box,
+                    "message": "No matching visitor check-in found to check out."}
+        duration = log_visitor_check_out(visitor_match["id"], camera=camera)
+        return {"result": "visitor_check_out", "box": box,
+                "message": f"Visitor checked out after {duration} minutes.",
+                "duration_minutes": duration}
+
+
 @app.post("/api/checkin")
 def checkin(payload: CheckInRequest):
     if not MODELS_LOADED:
@@ -178,60 +232,12 @@ def checkin(payload: CheckInRequest):
     faces = pipeline.detect_faces(frame)
 
     if faces is None or len(faces) == 0:
-        return {"result": "no_face", "message": "No face detected. Try again with better lighting."}
+        return {"faces_detected": 0, "results": [
+            {"result": "no_face", "message": "No face detected. Try again with better lighting."}
+        ]}
 
-    face_row = faces[0]
-    is_live, live_score, live_details = liveness.is_live(frame, face_row, debug=False)
-
-    if not is_live:
-        return {
-            "result": "spoof_suspected",
-            "message": f"Liveness check failed (score {live_score:.2f}). This looks like a photo or screen.",
-            "liveness_score": live_score,
-            "liveness_details": live_details,
-        }
-
-    embedding = pipeline.get_embedding(frame, face_row)
-    employees = get_all_employees()
-    match, score = pipeline.match(embedding, employees) if employees else (None, 0.0)
-
-    if match is not None:
-        # --- Recognized employee: unchanged from before ---
-        wearing_mask, mask_score = detect_mask(frame, face_row)
-        if payload.action == "check_in":
-            status = log_check_in(match["id"], match["shift_start"], wore_mask=wearing_mask)
-            return {
-                "result": "check_in", "status": status, "employee_name": match["name"],
-                "similarity": float(score), "liveness_score": live_score, "wore_mask": wearing_mask,
-            }
-        else:
-            status = log_check_out(match["id"])
-            return {
-                "result": "check_out", "status": status, "employee_name": match["name"],
-                "similarity": float(score),
-            }
-
-    # --- Not a recognized employee: handle as a VISITOR SESSION ---
-    # Match against currently-open visitor sessions (people who checked in
-    # as guests earlier and haven't checked out yet) using the exact same
-    # matching function as employees -- just against a temporary pool.
-    open_sessions = get_open_visitor_sessions()
-    visitor_match, visitor_score = pipeline.match(embedding, open_sessions) if open_sessions else (None, 0.0)
-
-    if payload.action == "check_in":
-        if visitor_match is not None:
-            return {"result": "visitor_already_checked_in",
-                    "message": "This visitor is already checked in (no new session created)."}
-        log_visitor_check_in(embedding, camera=payload.camera, best_similarity=float(score))
-        return {"result": "visitor_check_in", "message": "Visitor checked in.",
-                "similarity_to_employees": float(score)}
-    else:
-        if visitor_match is None:
-            return {"result": "visitor_no_session",
-                    "message": "No matching visitor check-in found to check out."}
-        duration = log_visitor_check_out(visitor_match["id"], camera=payload.camera)
-        return {"result": "visitor_check_out", "message": f"Visitor checked out after {duration} minutes.",
-                "duration_minutes": duration}
+    results = [_process_one_face(frame, face_row, payload.action, payload.camera) for face_row in faces]
+    return {"faces_detected": len(faces), "results": results}
 
 
 # ---------------------------------------------------------------------

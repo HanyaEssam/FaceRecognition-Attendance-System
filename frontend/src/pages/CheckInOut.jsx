@@ -5,28 +5,29 @@ import { checkIn } from "../api";
 function CheckInOut() {
   const camRef = useRef(null);
   const [action, setAction] = useState("check_in");
-  const [result, setResult] = useState(null);
+  const [response, setResponse] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [showDebug, setShowDebug] = useState(true);
+  const [showDebug, setShowDebug] = useState(false);
 
   const handleCapture = async () => {
     const image = camRef.current?.capture();
     if (!image) return;
     setBusy(true);
-    setResult(null);
+    setResponse(null);
     try {
       const camera = action === "check_in" ? "main gate in" : "main gate out";
       const data = await checkIn({ image, action, camera });
-      setResult(data);
+      setResponse(data);
     } catch (err) {
-      setResult({ result: "error", message: err.response?.data?.detail || err.message });
+      setResponse({ faces_detected: 0, results: [
+        { result: "error", message: err.response?.data?.detail || err.message }
+      ]});
     } finally {
       setBusy(false);
     }
   };
 
   const alertClass = (r) => {
-    if (!r) return "";
     if (r.result === "check_in") return r.status === "on_time" ? "alert-success" : "alert-warning";
     if (r.result === "check_out") return "alert-success";
     if (r.result === "visitor_check_in") return "alert-info";
@@ -35,6 +36,13 @@ function CheckInOut() {
     if (r.result === "visitor_no_session") return "alert-warning";
     if (r.result === "no_face") return "alert-warning";
     return "alert-danger";
+  };
+
+  const messageFor = (r) => {
+    if (r.message) return r.message;
+    if (r.result === "check_in") return `${r.employee_name} checked in — ${r.status}`;
+    if (r.result === "check_out") return `${r.employee_name} checked out`;
+    return "Unrecognized result.";
   };
 
   return (
@@ -54,25 +62,41 @@ function CheckInOut() {
         <button className="btn-primary" onClick={handleCapture} disabled={busy}>
           {busy ? "Processing…" : "Capture & Submit"}
         </button>
+        <p className="hint">
+          A single photo can include more than one person — everyone detected in frame
+          is checked in or out individually.
+        </p>
       </div>
 
       <div>
-        {result && (
-          <div className={`alert ${alertClass(result)}`}>
-            {result.message ||
-              (result.result === "check_in" && `${result.employee_name} checked in — ${result.status}`) ||
-              (result.result === "check_out" && `${result.employee_name} checked out`)}
-          </div>
-        )}
+        {response && (
+          <>
+            {response.faces_detected > 1 && (
+              <p className="hint">{response.faces_detected} people detected in this photo.</p>
+            )}
+            {response.results.map((r, i) => (
+              <div key={i} className={`alert ${alertClass(r)}`}>
+                {response.faces_detected > 1 && <strong>Person {i + 1}: </strong>}
+                {messageFor(r)}
+              </div>
+            ))}
 
-        {result?.liveness_details && showDebug && (
-          <div className="debug-box">
-            <div className="debug-box-header">
-              <strong>Liveness debug</strong>
-              <button className="btn-link" onClick={() => setShowDebug(false)}>hide</button>
-            </div>
-            <pre>{JSON.stringify(result.liveness_details, null, 2)}</pre>
-          </div>
+            {response.results.some((r) => r.liveness_details) && (
+              <div className="debug-box">
+                <div className="debug-box-header">
+                  <strong>Liveness debug</strong>
+                  <button className="btn-link" onClick={() => setShowDebug((v) => !v)}>
+                    {showDebug ? "hide" : "show"}
+                  </button>
+                </div>
+                {showDebug && response.results.map((r, i) => (
+                  r.liveness_details ? (
+                    <pre key={i}>{JSON.stringify(r.liveness_details, null, 2)}</pre>
+                  ) : null
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
