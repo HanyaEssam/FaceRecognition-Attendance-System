@@ -10,6 +10,7 @@ Run with:
 """
 import io
 import os
+import uuid
 import base64
 from datetime import date
 from typing import Optional, List
@@ -27,7 +28,8 @@ from db import (init_db, get_all_employees, log_check_in, log_check_out,
                  get_attendance_df, add_employee, delete_employee,
                  update_employee_profile, get_visitors_df,
                  get_visitor_count_this_month, get_today_summary,
-                 get_open_visitor_sessions, log_visitor_check_in, log_visitor_check_out)
+                 get_open_visitor_sessions, log_visitor_check_in, log_visitor_check_out,
+                 upload_visitor_photo, get_visitor_photo_path, get_visitor_photo_url)
 from face_pipeline import FacePipeline, LivenessChecker, detect_mask
 
 app = FastAPI(title="Attendance API")
@@ -91,6 +93,7 @@ class EmployeeCreate(BaseModel):
     name: str
     department: str
     shift_start: str = "09:00"
+    shift_end: str = "17:00"
     images: List[str]  # list of base64 data URLs, averaged into one embedding
     national_id: Optional[str] = None
     job_title: Optional[str] = None
@@ -105,6 +108,7 @@ class EmployeeProfileUpdate(BaseModel):
     name: Optional[str] = None
     department: Optional[str] = None
     shift_start: Optional[str] = None
+    shift_end: Optional[str] = None
     national_id: Optional[str] = None
     job_title: Optional[str] = None
     gender: Optional[str] = None
@@ -145,7 +149,8 @@ def create_employee(payload: EmployeeCreate):
 
     avg_embedding = np.mean(embeddings, axis=0)
     add_employee(
-        payload.name, payload.department, avg_embedding, shift_start=payload.shift_start,
+        payload.name, payload.department, avg_embedding,
+        shift_start=payload.shift_start, shift_end=payload.shift_end,
         national_id=payload.national_id, job_title=payload.job_title, gender=payload.gender,
         religion=payload.religion, marital_status=payload.marital_status,
         birth_date=payload.birth_date, address=payload.address,
@@ -212,7 +217,9 @@ def _process_one_face(frame, face_row, action, camera):
         if visitor_match is not None:
             return {"result": "visitor_already_checked_in", "box": box,
                     "message": "This visitor is already checked in (no new session created)."}
-        log_visitor_check_in(embedding, camera=camera, best_similarity=float(score))
+        _, jpeg_bytes = cv2.imencode(".jpg", frame)
+        photo_path = upload_visitor_photo(jpeg_bytes.tobytes(), session_id_hint=uuid.uuid4().hex[:8])
+        log_visitor_check_in(embedding, camera=camera, best_similarity=float(score), photo_path=photo_path)
         return {"result": "visitor_check_in", "box": box, "message": "Visitor checked in.",
                 "similarity_to_employees": float(score)}
     else:
@@ -309,6 +316,17 @@ def visitors():
         "total_all_time": len(df),
         "count_this_month": get_visitor_count_this_month(),
     }
+
+
+@router.get("/visitors/{visitor_id}/photo-url")
+def visitor_photo_url(visitor_id: int):
+    photo_path = get_visitor_photo_path(visitor_id)
+    if not photo_path:
+        raise HTTPException(status_code=404, detail="No photo on file for this visitor.")
+    url = get_visitor_photo_url(photo_path)
+    if not url:
+        raise HTTPException(status_code=503, detail="Could not generate photo URL (storage not configured).")
+    return {"url": url}
 
 
 # ---------------------------------------------------------------------

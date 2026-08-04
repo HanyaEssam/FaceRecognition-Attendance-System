@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine
 from datetime import datetime, date
+from supabase import create_client
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -71,6 +72,7 @@ def init_db():
             best_similarity REAL
         )
     """)
+    c.execute("ALTER TABLE visitors ADD COLUMN IF NOT EXISTS photo_path TEXT")
     conn.commit()
 
     # Migration: turn visitors from single-sighting rows into check-in/
@@ -324,17 +326,17 @@ def get_open_visitor_sessions():
     return [{"id": r[0], "embedding": np.frombuffer(bytes(r[1]), dtype=np.float32)} for r in rows]
 
 
-def log_visitor_check_in(embedding, camera="main gate in", best_similarity=None):
-    """Opens a new visitor session (stores their embedding so check-out can find them again)."""
+def log_visitor_check_in(embedding, camera="main gate in", best_similarity=None, photo_path=None):
     now = datetime.now()
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        "INSERT INTO visitors (detected_at, date, camera, camera_in, check_in, best_similarity, embedding) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO visitors (detected_at, date, camera, camera_in, check_in, best_similarity, embedding, photo_path) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (now.strftime("%H:%M:%S"), date.today().isoformat(), camera, camera,
          now.strftime("%H:%M:%S"), best_similarity,
-         psycopg2.Binary(np.asarray(embedding, dtype=np.float32).tobytes()))
+         psycopg2.Binary(np.asarray(embedding, dtype=np.float32).tobytes()),
+         photo_path)
     )
     conn.commit()
     c.close()
@@ -391,3 +393,40 @@ def get_visitor_count_this_month():
     c.close()
     conn.close()
     return count
+
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+_supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+VISITOR_PHOTOS_BUCKET = "visitor-photos"
+
+
+def upload_visitor_photo(image_bytes: bytes, session_id_hint: str) -> str | None:
+    """Uploads a visitor photo to Supabase Storage, returns the storage path (not a public URL, bucket is private)."""
+    if _supabase is None:
+        return None
+    path = f"{date.today().isoformat()}/{session_id_hint}_{datetime.now().strftime('%H%M%S')}.jpg"
+    _supabase.storage.from_(VISITOR_PHOTOS_BUCKET).upload(
+        path, image_bytes, {"content-type": "image/jpeg"}
+    )
+    return path
+
+
+def get_visitor_photo_path(visitor_id):
+    """Looks up the stored Supabase Storage path for a visitor's photo, if one was saved."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT photo_path FROM visitors WHERE id=%s", (visitor_id,))
+    row = c.fetchone()
+    c.close()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_visitor_photo_url(photo_path, expires_in=60):
+    """Generates a short-lived signed URL for a private-bucket photo. Returns None if storage isn't configured."""
+    if _supabase is None:
+        return None
+    signed = _supabase.storage.from_(VISITOR_PHOTOS_BUCKET).create_signed_url(photo_path, expires_in)
+    return signed.get("signedURL") or signed.get("signedUrl")
