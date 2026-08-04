@@ -4,14 +4,13 @@ import { checkIn } from "../api";
 
 function CheckInOut() {
   const camRef = useRef(null);
+  const fileInputRef = useRef(null);
   const [action, setAction] = useState("check_in");
   const [response, setResponse] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
 
-  const handleCapture = async () => {
-    const image = camRef.current?.capture();
-    if (!image) return;
+  const submitImage = async (image) => {
     setBusy(true);
     setResponse(null);
     try {
@@ -25,6 +24,30 @@ function CheckInOut() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleCapture = async () => {
+    const image = camRef.current?.capture();
+    if (!image) return;
+    submitImage(image);
+  };
+
+  const handleFileButtonClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => submitImage(reader.result);
+    reader.onerror = () => {
+      setResponse({ faces_detected: 0, results: [
+        { result: "error", message: "Could not read the selected image file." }
+      ]});
+    };
+    reader.readAsDataURL(file);
+    e.target.value = ""; // allow re-selecting the same file later
   };
 
   const alertClass = (r) => {
@@ -59,9 +82,21 @@ function CheckInOut() {
                    onChange={() => setAction("check_out")} /> Check Out
           </label>
         </div>
-        <button className="btn-primary" onClick={handleCapture} disabled={busy}>
-          {busy ? "Processing…" : "Capture & Submit"}
-        </button>
+        <div className="action-row">
+          <button className="btn-primary" onClick={handleCapture} disabled={busy}>
+            {busy ? "Processing…" : "Capture & Submit"}
+          </button>
+          <button className="btn-secondary" onClick={handleFileButtonClick} disabled={busy}>
+            Upload Image
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={handleFileChange}
+          />
+        </div>
         <p className="hint">
           A single photo can include more than one person — everyone detected in frame
           is checked in or out individually.

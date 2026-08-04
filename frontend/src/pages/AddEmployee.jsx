@@ -5,6 +5,17 @@ import { Info, Camera, RotateCcw, Save } from "lucide-react";
 
 const NUM_CAPTURES_NEEDED = 3;
 
+const DEPARTMENTS = [
+  "Ai and Software",
+  "Human Resources",
+  "Finance",
+  "Sales",
+  "Marketing",
+  "Operations",
+  "IT Support",
+  "Customer Service",
+];
+
 function AddEmployee() {
   const camRef = useRef(null);
   const [form, setForm] = useState({
@@ -30,6 +41,7 @@ function AddEmployee() {
 
   const save = async () => {
     if (!form.name.trim()) { setMessage("Please enter a name before saving."); return; }
+    if (!form.department) { setMessage("Please select a department before saving."); return; }
     setBusy(true);
     try {
       const payload = { ...form, images: captures };
@@ -55,7 +67,14 @@ function AddEmployee() {
 
       <div className="profile-grid">
         <label>Full name <input value={form.name} onChange={set("name")} /></label>
-        <label>Department <input value={form.department} onChange={set("department")} /></label>
+        <label>Department
+          <select value={form.department} onChange={set("department")}>
+            <option value="">— Select department —</option>
+            {DEPARTMENTS.map((dept) => (
+              <option key={dept} value={dept}>{dept}</option>
+            ))}
+          </select>
+        </label>
         <label>Shift start (HH:MM) <input value={form.shift_start} onChange={set("shift_start")} /></label>
         <label>Shift end (HH:MM) <input value={form.shift_end} onChange={set("shift_end")} /></label>
       </div>
