@@ -77,4 +77,7 @@ export const getHealth = () =>
     .get("/health")
     .then((response) => response.data);
 
+
+export const getVisitorPhotoUrl = (visitorId) => api.get(`/visitors/${visitorId}/photo-url`).then(r => r.data);
+
 export default api;

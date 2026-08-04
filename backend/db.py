@@ -387,8 +387,8 @@ def log_visitor_check_out(session_id, camera="main gate out"):
 
 def get_visitors_df():
     df = pd.read_sql_query(
-        "SELECT date, check_in, check_out, camera_in, camera_out, best_similarity FROM visitors "
-        "ORDER BY date DESC, check_in DESC", _engine
+        "SELECT id, date, check_in, check_out, camera_in, camera_out, best_similarity, photo_path "
+        "FROM visitors ORDER BY date DESC, check_in DESC", _engine
     )
     if not df.empty:
         def duration(row):

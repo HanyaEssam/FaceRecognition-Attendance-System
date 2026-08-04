@@ -194,6 +194,7 @@ const WebcamCapture = forwardRef(function WebcamCapture(
         playsInline
         muted
         className="webcam-video"
+        style={{ transform: "scaleX(-1)" }}
       />
 
       <canvas
