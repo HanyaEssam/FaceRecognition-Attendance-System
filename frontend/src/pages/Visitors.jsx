@@ -1,11 +1,36 @@
 import { useEffect, useState } from "react";
-import { getVisitors, getVisitorPhotoUrl } from "../api";
+import { Download, RotateCcw, Search } from "lucide-react";
+import {
+  exportVisitorsCsvUrl,
+  exportVisitorsXlsxUrl,
+  getVisitors,
+  getVisitorPhotoUrl,
+} from "../api";
 
 function Visitors() {
   const [data, setData] = useState(null);
   const [loadingPhotoId, setLoadingPhotoId] = useState(null);
+  const [startDate, setStartDate] = useState(
+    new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10)
+  );
+  const [endDate, setEndDate] = useState(
+    new Date().toISOString().slice(0, 10)
+  );
 
-  useEffect(() => { getVisitors().then(setData); }, []);
+  const load = () => {
+    getVisitors({
+      start_date: startDate || undefined,
+      end_date: endDate || undefined,
+    }).then(setData);
+  };
+
+  const clearFilters = () => {
+    setStartDate("");
+    setEndDate("");
+    getVisitors().then(setData);
+  };
+
+  useEffect(() => { load(); }, []);
 
   const handleViewPhoto = async (visitorId) => {
     setLoadingPhotoId(visitorId);
@@ -23,6 +48,27 @@ function Visitors() {
 
   return (
     <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "16px", marginBottom: "16px" }}>
+        <div className="filter-row">
+          <label>Start <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></label>
+          <label>End <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></label>
+          <button className="btn-primary" onClick={load}>
+            <Search size={16} /> Search
+          </button>
+          <button className="btn-secondary" onClick={clearFilters}>
+            <RotateCcw size={16} /> Clear filters
+          </button>
+        </div>
+
+        <div className="action-row" style={{ margin: 0 }}>
+          <a className="btn-secondary" href={exportVisitorsCsvUrl({ start_date: startDate, end_date: endDate })}>
+            <Download size={16} /> Download CSV
+          </a>
+          <a className="btn-secondary" href={exportVisitorsXlsxUrl({ start_date: startDate, end_date: endDate })}>
+            <Download size={16} /> Download XLSX
+          </a>
+        </div>
+      </div>
 
       <div className="stat-grid">
         <div className="stat-card tone-info">

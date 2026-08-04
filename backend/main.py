@@ -762,15 +762,63 @@ def export_xlsx():
     )
 
 
+def _filter_visitors_by_date(
+    df: pd.DataFrame,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    if start_date:
+        df = df[df["date"] >= start_date]
+    if end_date:
+        df = df[df["date"] <= end_date]
+    return df
+
+
 @router.get("/visitors")
-def visitors():
-    df = get_visitors_df()
+def visitors(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    all_visitors = get_visitors_df()
+    df = _filter_visitors_by_date(all_visitors, start_date, end_date)
     df = df.astype(object).where(df.notnull(), None)
     return {
         "records": df.to_dict(orient="records"),
-        "total_all_time": len(df),
+        "total_all_time": len(all_visitors),
         "count_this_month": get_visitor_count_this_month(),
     }
+
+
+@router.get("/visitors/export/csv")
+def export_visitors_csv(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    df = _filter_visitors_by_date(get_visitors_df(), start_date, end_date)
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=visitor_log.csv"},
+    )
+
+
+@router.get("/visitors/export/xlsx")
+def export_visitors_xlsx(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    df = _filter_visitors_by_date(get_visitors_df(), start_date, end_date)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Visitors")
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=visitor_log.xlsx"},
+    )
 
 
 @router.get("/visitors/{visitor_id}/photo-url")

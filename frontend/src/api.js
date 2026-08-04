@@ -62,10 +62,23 @@ export const exportCsvUrl = () =>
 export const exportXlsxUrl = () =>
   `${API_BASE_URL}/attendance/export/xlsx`;
 
-export const getVisitors = () =>
+export const getVisitors = (params = {}) =>
   api
-    .get("/visitors")
+    .get("/visitors", { params })
     .then((response) => response.data);
+
+const visitorExportUrl = (format, params = {}) => {
+  const query = new URLSearchParams(
+    Object.entries(params).filter(([, value]) => value)
+  ).toString();
+  return `${API_BASE_URL}/visitors/export/${format}${query ? `?${query}` : ""}`;
+};
+
+export const exportVisitorsCsvUrl = (params = {}) =>
+  visitorExportUrl("csv", params);
+
+export const exportVisitorsXlsxUrl = (params = {}) =>
+  visitorExportUrl("xlsx", params);
 
 export const getDashboardStats = () =>
   api
