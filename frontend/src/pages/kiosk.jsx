@@ -90,7 +90,6 @@ function Kiosk() {
     const hiddenResults = new Set([
       "cooldown",
       "too_soon",
-      "visitor_too_soon",
     ]);
 
     const meaningfulResults = results.filter(
