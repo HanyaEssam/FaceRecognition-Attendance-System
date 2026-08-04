@@ -8,40 +8,66 @@ frontend talks to.
 Run with:
     uvicorn main:app --reload --port 8000
 """
+import base64
 import io
 import os
+import time
 import uuid
-import base64
-from datetime import date
-from typing import Optional, List
+from datetime import date, datetime
+from typing import List, Optional
 
 import cv2
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from dotenv import load_dotenv
+
 load_dotenv()
-from db import (init_db, get_all_employees, log_check_in, log_check_out,
-                 get_attendance_df, add_employee, delete_employee,
-                 update_employee_profile, get_visitors_df,
-                 get_visitor_count_this_month, get_today_summary,
-                 get_open_visitor_sessions, log_visitor_check_in, log_visitor_check_out,
-                 upload_visitor_photo, get_visitor_photo_path, get_visitor_photo_url)
+from db import (
+    add_employee,
+    delete_employee,
+    get_all_employees,
+    get_attendance_df,
+    get_open_visitor_sessions,
+    get_today_status,
+    get_today_summary,
+    get_visitor_count_this_month,
+    get_visitors_df,
+    init_db,
+    log_check_in,
+    log_check_out,
+    log_visitor_check_in,
+    log_visitor_check_out,
+    get_visitor_photo_path,
+    get_visitor_photo_url,
+    upload_visitor_photo,
+    update_employee_profile,
+)
 from face_pipeline import FacePipeline, LivenessChecker, detect_mask
 
 app = FastAPI(title="Attendance API")
 router = APIRouter(prefix="/api")
 
-# Add your deployed frontend URL here via the FRONTEND_URL env var
-# (e.g. FRONTEND_URL=https://your-app.vercel.app), or it falls back to
-# just the local Vite dev server for local development.
-_extra_origin = os.environ.get("FRONTEND_URL")
-_allow_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
-if _extra_origin:
-    _allow_origins.append(_extra_origin)
+# CORS
+#
+# Railway environment variable examples:
+# FRONTEND_URL=https://your-app.vercel.app
+#
+# You may also provide several comma-separated URLs:
+# FRONTEND_URL=https://app.vercel.app,https://www.example.com
+_frontend_urls = os.environ.get("FRONTEND_URL", "")
+_allow_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+for origin in _frontend_urls.split(","):
+    origin = origin.strip().rstrip("/")
+    if origin and origin not in _allow_origins:
+        _allow_origins.append(origin)
 
 app.add_middleware(
     CORSMiddleware,
@@ -160,7 +186,7 @@ def create_employee(payload: EmployeeCreate):
 
 @router.put("/employees/{employee_id}")
 def edit_employee(employee_id: int, payload: EmployeeProfileUpdate):
-    fields = {k: v for k, v in payload.dict().items() if v is not None}
+    fields = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update.")
     update_employee_profile(employee_id, **fields)
@@ -249,9 +275,427 @@ def checkin(payload: CheckInRequest):
     return {"faces_detected": len(faces), "results": results}
 
 
+
 # ---------------------------------------------------------------------
-# Attendance
+# Kiosk mode — continuous automatic scanning
 # ---------------------------------------------------------------------
+
+# Ignore repeated scans of the same recognized person for this many seconds.
+KIOSK_COOLDOWN_SECONDS = int(
+    os.environ.get("KIOSK_COOLDOWN_SECONDS", "10")
+)
+
+# With one camera, a second sighting is considered check-out only after this
+# number of minutes. For a real installation, separate IN and OUT cameras are
+# safer; the request model below also supports direction="in" or "out".
+MIN_MINUTES_BEFORE_CHECKOUT = int(
+    os.environ.get("MIN_MINUTES_BEFORE_CHECKOUT", "60")
+)
+
+# In-memory duplicate protection. This is suitable for a single Railway
+# process. It resets whenever the Railway service restarts.
+_last_processed = {}
+
+
+def _cooldown_key(
+    kind: str,
+    entity_id: int,
+    direction: str,
+) -> str:
+    """
+    Keep separate cooldowns for entrance and exit processing.
+
+    Example:
+      emp_3_in
+      emp_3_out
+
+    This prevents a recent check-in from blocking a legitimate check-out
+    when the operator switches from "main gate in" to "main gate out".
+    """
+    return f"{kind}_{entity_id}_{direction}"
+
+
+def _in_cooldown(
+    kind: str,
+    entity_id: int,
+    direction: str,
+) -> bool:
+    last_time = _last_processed.get(
+        _cooldown_key(kind, entity_id, direction)
+    )
+
+    if last_time is None:
+        return False
+
+    return (
+        time.time() - last_time
+    ) < KIOSK_COOLDOWN_SECONDS
+
+
+def _mark_processed(
+    kind: str,
+    entity_id: int,
+    direction: str,
+) -> None:
+    _last_processed[
+        _cooldown_key(kind, entity_id, direction)
+    ] = time.time()
+
+
+def _minutes_since(time_string: Optional[str]) -> float:
+    if not time_string:
+        return 0.0
+
+    stored_time = datetime.strptime(time_string, "%H:%M:%S")
+    now = datetime.now()
+    stored_datetime = datetime.combine(now.date(), stored_time.time())
+    return max((now - stored_datetime).total_seconds() / 60.0, 0.0)
+
+
+def _camera_direction(camera: str, requested_direction: str) -> str:
+    """
+    Resolve whether this camera should act as an IN or OUT camera.
+
+    Priority:
+      1. Explicit direction from frontend: "in", "out", or "auto"
+      2. Camera name ending in/containing "out"
+      3. Otherwise automatic history-based behavior
+    """
+    direction = (requested_direction or "auto").strip().lower()
+
+    if direction in {"in", "out"}:
+        return direction
+
+    camera_name = (camera or "").strip().lower()
+    if "out" in camera_name:
+        return "out"
+    if "in" in camera_name:
+        return "in"
+
+    return "auto"
+
+
+def _kiosk_process_employee(
+    frame,
+    face_row,
+    box,
+    match,
+    score,
+    direction,
+):
+    employee_id = match["id"]
+    employee_name = match["name"]
+
+    if _in_cooldown("emp", employee_id, direction):
+        return {
+            "result": "cooldown",
+            "box": box,
+            "employee_name": employee_name,
+        }
+
+    check_in_time, check_out_time = get_today_status(employee_id)
+
+    # Dedicated entrance camera
+    if direction == "in":
+        if check_in_time is not None:
+            return {
+                "result": "too_soon",
+                "box": box,
+                "employee_name": employee_name,
+            }
+
+        wearing_mask, mask_score = detect_mask(frame, face_row)
+        status = log_check_in(
+            employee_id,
+            match["shift_start"],
+            wore_mask=wearing_mask,
+        )
+        _mark_processed("emp", employee_id, direction)
+
+        return {
+            "result": "check_in",
+            "box": box,
+            "status": status,
+            "employee_name": employee_name,
+            "similarity": float(score),
+            "wore_mask": bool(wearing_mask),
+            "mask_score": float(mask_score),
+        }
+
+    # Dedicated exit camera
+    if direction == "out":
+        if check_in_time is None:
+            return {
+                "result": "no_check_in",
+                "box": box,
+                "employee_name": employee_name,
+                "message": "Employee has not checked in today.",
+            }
+
+        if check_out_time is not None:
+            return {
+                "result": "already_done",
+                "box": box,
+                "employee_name": employee_name,
+            }
+
+        status = log_check_out(employee_id)
+        _mark_processed("emp", employee_id, direction)
+
+        return {
+            "result": "check_out",
+            "box": box,
+            "status": status,
+            "employee_name": employee_name,
+            "similarity": float(score),
+        }
+
+    # One-camera automatic behavior
+    if check_in_time is None:
+        wearing_mask, mask_score = detect_mask(frame, face_row)
+        status = log_check_in(
+            employee_id,
+            match["shift_start"],
+            wore_mask=wearing_mask,
+        )
+        _mark_processed("emp", employee_id, direction)
+
+        return {
+            "result": "check_in",
+            "box": box,
+            "status": status,
+            "employee_name": employee_name,
+            "similarity": float(score),
+            "wore_mask": bool(wearing_mask),
+            "mask_score": float(mask_score),
+        }
+
+    if check_out_time is not None:
+        return {
+            "result": "already_done",
+            "box": box,
+            "employee_name": employee_name,
+        }
+
+    elapsed_minutes = _minutes_since(check_in_time)
+    if elapsed_minutes < MIN_MINUTES_BEFORE_CHECKOUT:
+        return {
+            "result": "too_soon",
+            "box": box,
+            "employee_name": employee_name,
+            "minutes_since_check_in": round(elapsed_minutes, 1),
+        }
+
+    status = log_check_out(employee_id)
+    _mark_processed("emp", employee_id, direction)
+
+    return {
+        "result": "check_out",
+        "box": box,
+        "status": status,
+        "employee_name": employee_name,
+        "similarity": float(score),
+    }
+
+
+def _kiosk_process_visitor(
+    embedding,
+    box,
+    camera,
+    direction,
+    employee_similarity,
+):
+    open_sessions = get_open_visitor_sessions()
+    visitor_match, visitor_score = (
+        pipeline.match(embedding, open_sessions)
+        if open_sessions
+        else (None, 0.0)
+    )
+
+    # Entrance camera: create a session only for a new visitor.
+    if direction == "in":
+        if visitor_match is not None:
+            return {
+                "result": "visitor_too_soon",
+                "box": box,
+                "message": "Visitor session is already active.",
+            }
+
+        log_visitor_check_in(
+            embedding,
+            camera=camera,
+            best_similarity=float(employee_similarity),
+        )
+        return {
+            "result": "visitor_check_in",
+            "box": box,
+            "similarity_to_employees": float(employee_similarity),
+        }
+
+    # Exit camera: only close an existing visitor session.
+    if direction == "out":
+        if visitor_match is None:
+            return {
+                "result": "visitor_no_session",
+                "box": box,
+                "message": "No matching open visitor session was found.",
+            }
+
+        visitor_id = visitor_match["id"]
+        if _in_cooldown("visitor", visitor_id, direction):
+            return {"result": "cooldown", "box": box}
+
+        duration = log_visitor_check_out(visitor_id, camera=camera)
+        _mark_processed("visitor", visitor_id, direction)
+
+        return {
+            "result": "visitor_check_out",
+            "box": box,
+            "duration_minutes": duration,
+            "similarity": float(visitor_score),
+        }
+
+    # One-camera automatic visitor behavior.
+    if visitor_match is None:
+        log_visitor_check_in(
+            embedding,
+            camera=camera,
+            best_similarity=float(employee_similarity),
+        )
+        return {
+            "result": "visitor_check_in",
+            "box": box,
+            "similarity_to_employees": float(employee_similarity),
+        }
+
+    visitor_id = visitor_match["id"]
+    if _in_cooldown("visitor", visitor_id, direction):
+        return {"result": "cooldown", "box": box}
+
+    elapsed_minutes = _minutes_since(visitor_match.get("check_in"))
+    if elapsed_minutes < MIN_MINUTES_BEFORE_CHECKOUT:
+        return {
+            "result": "visitor_too_soon",
+            "box": box,
+            "minutes_since_check_in": round(elapsed_minutes, 1),
+        }
+
+    duration = log_visitor_check_out(visitor_id, camera=camera)
+    _mark_processed("visitor", visitor_id, direction)
+
+    return {
+        "result": "visitor_check_out",
+        "box": box,
+        "duration_minutes": duration,
+        "similarity": float(visitor_score),
+    }
+
+
+def _kiosk_process_one_face(
+    frame,
+    face_row,
+    camera: str,
+    requested_direction: str,
+):
+    box = face_row[:4].astype(int).tolist()
+
+    is_live, live_score, live_details = liveness.is_live(
+        frame,
+        face_row,
+        debug=False,
+    )
+
+    if not is_live:
+        return {
+            "result": "spoof_suspected",
+            "box": box,
+            "message": f"Liveness check failed (score {live_score:.2f}).",
+            "liveness_score": float(live_score),
+            "liveness_details": live_details,
+        }
+
+    embedding = pipeline.get_embedding(frame, face_row)
+    employees = get_all_employees()
+    match, score = (
+        pipeline.match(embedding, employees)
+        if employees
+        else (None, 0.0)
+    )
+
+    direction = _camera_direction(camera, requested_direction)
+
+    if match is not None:
+        return _kiosk_process_employee(
+            frame,
+            face_row,
+            box,
+            match,
+            score,
+            direction,
+        )
+
+    return _kiosk_process_visitor(
+        embedding,
+        box,
+        camera,
+        direction,
+        score,
+    )
+class KioskScanRequest(BaseModel):
+    image: str
+    camera: str = "main gate in"
+    direction: str = "auto"
+
+
+@router.post("/kiosk/scan")
+def kiosk_scan(payload: KioskScanRequest):
+    requested_direction = payload.direction.strip().lower()
+
+    if requested_direction not in {"in", "out", "auto"}:
+        raise HTTPException(
+            status_code=400,
+            detail='direction must be "in", "out", or "auto".',
+        )
+
+    if not MODELS_LOADED:
+        raise HTTPException(
+            status_code=503,
+            detail="Face models are not loaded on the server.",
+        )
+
+    frame = decode_image(payload.image)
+    faces = pipeline.detect_faces(frame)
+
+    if faces is None or len(faces) == 0:
+        return {
+            "faces_detected": 0,
+            "results": [],
+        }
+
+    results = []
+
+    for face_row in faces:
+        try:
+            results.append(
+                _kiosk_process_one_face(
+                    frame,
+                    face_row,
+                    payload.camera,
+                    requested_direction,
+                )
+            )
+        except Exception as error:
+            print("Kiosk face processing error:", repr(error))
+            results.append({
+                "result": "processing_error",
+                "message": str(error),
+            })
+
+    return {
+        "faces_detected": int(len(faces)),
+        "results": results,
+    }
+
 @router.get("/attendance")
 def attendance(
     start_date: Optional[str] = None,
@@ -304,9 +748,6 @@ def export_xlsx():
     )
 
 
-# ---------------------------------------------------------------------
-# Visitors
-# ---------------------------------------------------------------------
 @router.get("/visitors")
 def visitors():
     df = get_visitors_df()
@@ -372,7 +813,12 @@ def dashboard_stats():
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "models_loaded": MODELS_LOADED}
+    return {
+        "status": "ok",
+        "models_loaded": MODELS_LOADED,
+        "kiosk_endpoint": "/api/kiosk/scan",
+        "supported_directions": ["in", "out", "auto"],
+    }
 
 @app.get("/")
 def root():

@@ -309,21 +309,40 @@ def delete_employee(employee_id):
 
 def get_open_visitor_sessions():
     """
-    Returns currently-checked-in visitors (no check_out yet) as a list of
-    dicts shaped exactly like get_all_employees() output -- specifically
-    so this can be passed straight into FacePipeline.match(), reusing the
-    exact same matching logic that identifies employees.
+    Returns currently checked-in visitors whose sessions are still open.
+
+    Each result contains:
+      - id: visitor session ID
+      - embedding: the stored float32 face embedding
+      - check_in: the visitor check-in time
+
+    The kiosk needs check_in to decide whether enough time has passed
+    before treating another sighting as a visitor check-out.
     """
     conn = get_conn()
     c = conn.cursor()
+
     c.execute("""
-        SELECT id, embedding FROM visitors
-        WHERE check_in IS NOT NULL AND check_out IS NULL AND embedding IS NOT NULL
+        SELECT id, embedding, check_in
+        FROM visitors
+        WHERE check_in IS NOT NULL
+          AND check_out IS NULL
+          AND embedding IS NOT NULL
     """)
+
     rows = c.fetchall()
+
     c.close()
     conn.close()
-    return [{"id": r[0], "embedding": np.frombuffer(bytes(r[1]), dtype=np.float32)} for r in rows]
+
+    return [
+        {
+            "id": row[0],
+            "embedding": np.frombuffer(bytes(row[1]), dtype=np.float32),
+            "check_in": row[2],
+        }
+        for row in rows
+    ]
 
 
 def log_visitor_check_in(embedding, camera="main gate in", best_similarity=None, photo_path=None):
