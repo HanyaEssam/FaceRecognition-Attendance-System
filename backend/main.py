@@ -499,6 +499,7 @@ def _kiosk_process_employee(
 
 
 def _kiosk_process_visitor(
+    frame,
     embedding,
     box,
     camera,
@@ -521,10 +522,16 @@ def _kiosk_process_visitor(
                 "message": "Visitor session is already active.",
             }
 
+        _, jpeg_bytes = cv2.imencode(".jpg", frame)
+        photo_path = upload_visitor_photo(
+            jpeg_bytes.tobytes(),
+            session_id_hint=uuid.uuid4().hex[:8],
+        )
         log_visitor_check_in(
             embedding,
             camera=camera,
             best_similarity=float(employee_similarity),
+            photo_path=photo_path,
         )
         return {
             "result": "visitor_check_in",
@@ -557,10 +564,16 @@ def _kiosk_process_visitor(
 
     # One-camera automatic visitor behavior.
     if visitor_match is None:
+        _, jpeg_bytes = cv2.imencode(".jpg", frame)
+        photo_path = upload_visitor_photo(
+            jpeg_bytes.tobytes(),
+            session_id_hint=uuid.uuid4().hex[:8],
+        )
         log_visitor_check_in(
             embedding,
             camera=camera,
             best_similarity=float(employee_similarity),
+            photo_path=photo_path,
         )
         return {
             "result": "visitor_check_in",
@@ -635,6 +648,7 @@ def _kiosk_process_one_face(
         )
 
     return _kiosk_process_visitor(
+        frame,
         embedding,
         box,
         camera,
