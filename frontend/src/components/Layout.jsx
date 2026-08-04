@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useState } from "react";
 
 import {
@@ -23,7 +23,11 @@ const CAMERAS = [
 ];
 
 function Layout() {
+  const location = useLocation();
   const [selectedCamera, setSelectedCamera] = useState(CAMERAS[0]);
+  const showCameraToggle = ["/checkin", "/kiosk"].includes(
+    location.pathname
+  );
 
   const navItems = [
     {
@@ -115,35 +119,37 @@ function Layout() {
       </aside>
 
       <div className="main-area">
-        <div className="cam-bar">
-          <span className="cam-bar-label">
-            CAMERAS
-          </span>
+        {showCameraToggle && (
+          <div className="cam-bar">
+            <span className="cam-bar-label">
+              CAMERAS
+            </span>
 
-          {CAMERAS.map((camera) => (
-            <label
-              key={camera.name}
-              className={
-                selectedCamera.name === camera.name
-                  ? "cam-toggle cam-toggle-active"
-                  : "cam-toggle"
-              }
-            >
-              <input
-                type="radio"
-                name="selected-camera"
-                checked={
+            {CAMERAS.map((camera) => (
+              <label
+                key={camera.name}
+                className={
                   selectedCamera.name === camera.name
+                    ? "cam-toggle cam-toggle-active"
+                    : "cam-toggle"
                 }
-                onChange={() =>
-                  setSelectedCamera(camera)
-                }
-              />
+              >
+                <input
+                  type="radio"
+                  name="selected-camera"
+                  checked={
+                    selectedCamera.name === camera.name
+                  }
+                  onChange={() =>
+                    setSelectedCamera(camera)
+                  }
+                />
 
-              <span>{camera.name}</span>
-            </label>
-          ))}
-        </div>
+                <span>{camera.name}</span>
+              </label>
+            ))}
+          </div>
+        )}
 
         <header className="app-header">
           <h1 className="app-title">
