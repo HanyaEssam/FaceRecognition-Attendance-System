@@ -46,7 +46,7 @@ from db import (
     upload_visitor_photo,
     update_employee_profile,
 )
-from face_pipeline import FacePipeline, LivenessChecker, detect_mask
+from face_pipeline import FacePipeline, LivenessChecker
 
 app = FastAPI(title="Attendance API")
 router = APIRouter(prefix="/api")
@@ -221,12 +221,11 @@ def _process_one_face(frame, face_row, action, camera):
     match, score = pipeline.match(embedding, employees) if employees else (None, 0.0)
 
     if match is not None:
-        wearing_mask, mask_score = detect_mask(frame, face_row)
         if action == "check_in":
-            status = log_check_in(match["id"], match["shift_start"], wore_mask=wearing_mask)
+            status = log_check_in(match["id"], match["shift_start"])
             return {
                 "result": "check_in", "box": box, "status": status, "employee_name": match["name"],
-                "similarity": float(score), "liveness_score": live_score, "wore_mask": wearing_mask,
+                "similarity": float(score), "liveness_score": live_score,
             }
         else:
             status = log_check_out(match["id"])
@@ -404,11 +403,9 @@ def _kiosk_process_employee(
                 "employee_name": employee_name,
             }
 
-        wearing_mask, mask_score = detect_mask(frame, face_row)
         status = log_check_in(
             employee_id,
             match["shift_start"],
-            wore_mask=wearing_mask,
         )
         _mark_processed("emp", employee_id, direction)
 
@@ -418,8 +415,6 @@ def _kiosk_process_employee(
             "status": status,
             "employee_name": employee_name,
             "similarity": float(score),
-            "wore_mask": bool(wearing_mask),
-            "mask_score": float(mask_score),
         }
 
     # Dedicated exit camera
@@ -452,11 +447,9 @@ def _kiosk_process_employee(
 
     # One-camera automatic behavior
     if check_in_time is None:
-        wearing_mask, mask_score = detect_mask(frame, face_row)
         status = log_check_in(
             employee_id,
             match["shift_start"],
-            wore_mask=wearing_mask,
         )
         _mark_processed("emp", employee_id, direction)
 
@@ -466,8 +459,6 @@ def _kiosk_process_employee(
             "status": status,
             "employee_name": employee_name,
             "similarity": float(score),
-            "wore_mask": bool(wearing_mask),
-            "mask_score": float(mask_score),
         }
 
     if check_out_time is not None:

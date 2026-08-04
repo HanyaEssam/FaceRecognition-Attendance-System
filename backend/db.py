@@ -59,8 +59,7 @@ def init_db():
             date TEXT NOT NULL,
             check_in TEXT,
             check_out TEXT,
-            status TEXT,
-            wore_mask INTEGER DEFAULT 0
+            status TEXT
         )
     """)
     c.execute("""
@@ -203,7 +202,7 @@ def get_today_status(employee_id):
     return row[1], row[2]
 
 
-def log_check_in(employee_id, shift_start="09:00", grace_minutes=10, wore_mask=False):
+def log_check_in(employee_id, shift_start="09:00", grace_minutes=10):
     """Logs a check-in for today if one doesn't already exist. Returns a status string."""
     today = date.today().isoformat()
     now = datetime.now()
@@ -215,17 +214,15 @@ def log_check_in(employee_id, shift_start="09:00", grace_minutes=10, wore_mask=F
     shift_dt = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
     late_cutoff = shift_dt.timestamp() + grace_minutes * 60
     status = "on_time" if now.timestamp() <= late_cutoff else "late"
-    mask_val = 1 if wore_mask else 0
-
     conn = get_conn()
     c = conn.cursor()
     if existing:
-        c.execute("UPDATE attendance SET check_in=%s, status=%s, wore_mask=%s WHERE id=%s",
-                   (now.strftime("%H:%M:%S"), status, mask_val, existing[0]))
+        c.execute("UPDATE attendance SET check_in=%s, status=%s WHERE id=%s",
+                   (now.strftime("%H:%M:%S"), status, existing[0]))
     else:
         c.execute(
-            "INSERT INTO attendance (employee_id, date, check_in, status, wore_mask) VALUES (%s, %s, %s, %s, %s)",
-            (employee_id, today, now.strftime("%H:%M:%S"), status, mask_val)
+            "INSERT INTO attendance (employee_id, date, check_in, status) VALUES (%s, %s, %s, %s)",
+            (employee_id, today, now.strftime("%H:%M:%S"), status)
         )
     conn.commit()
     c.close()
@@ -252,8 +249,7 @@ def log_check_out(employee_id):
 def get_attendance_df():
     df = pd.read_sql_query("""
         SELECT e.id AS employee_id, e.name, e.department, a.date,
-               a.check_in, a.check_out, a.status,
-               CASE WHEN a.wore_mask=1 THEN 'Yes' ELSE 'No' END AS wore_mask
+               a.check_in, a.check_out, a.status
         FROM attendance a JOIN employees e ON a.employee_id = e.id
         ORDER BY a.date DESC, a.check_in DESC
     """, _engine)

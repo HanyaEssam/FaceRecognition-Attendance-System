@@ -85,7 +85,7 @@ function AttendanceLog() {
           <tr>
             <th>Employee ID</th><th>Employee Name</th><th>Department</th><th>Date</th>
             <th>Entry Camera</th><th>Entry Time</th><th>Exit Camera</th><th>Exit Time</th>
-            <th>Status</th><th>Wore Mask</th><th>Work Hours</th>
+            <th>Status</th><th>Work Hours</th>
           </tr>
         </thead>
         <tbody>
@@ -94,7 +94,7 @@ function AttendanceLog() {
               <td>{r.employee_id}</td><td>{r.name}</td><td>{r.department}</td><td>{r.date}</td>
               <td>main gate in</td><td>{r.check_in || "—"}</td>
               <td>main gate out</td><td>{r.check_out || "—"}</td>
-              <td>{r.status}</td><td>{r.wore_mask}</td><td>{r.work_hours ?? "—"}</td>
+              <td>{r.status}</td><td>{r.work_hours ?? "—"}</td>
             </tr>
           ))}
         </tbody>
