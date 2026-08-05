@@ -51,10 +51,15 @@ export const kioskScan = (payload) =>
     .post("/kiosk/scan", payload)
     .then((response) => response.data);
 
-export const getAttendance = (params = {}) =>
+export const getAttendance = (params = {}) => 
   api
     .get("/attendance", { params })
-    .then((response) => response.data);
+    .then(r => r.data);
+
+export const getAttendanceSummary = (params = {}) => 
+  api
+    .get("/attendance/summary", { params })
+    .then(r => r.data);
 
 export const exportCsvUrl = () =>
   `${API_BASE_URL}/attendance/export/csv`;

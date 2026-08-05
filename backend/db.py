@@ -1,18 +1,11 @@
 """
 db.py — PostgreSQL storage for enrolled employees and attendance records.
 
-Migrated from SQLite. Function names and signatures are UNCHANGED from
-the SQLite version, so main.py (or app.py) needs no changes at all --
-only this file and the connection config change.
-
-Connection string comes from the DATABASE_URL environment variable,
-e.g.:
-    postgresql://username:password@localhost:5432/attendance
-
-Embeddings are stored as raw float32 bytes (BYTEA) and reloaded as
-numpy arrays -- same approach as before, just SQLite BLOB -> Postgres
-BYTEA. Fine at POC/small-company scale (hundreds of employees); beyond
-that, look at the pgvector extension for a proper vector index.
+Attendance is now SESSION-based: each check-in creates a NEW row rather
+than reusing/overwriting a single row per employee per day. This allows
+an employee to check in/out multiple times in a day (e.g. lunch break),
+with every attempt preserved as its own row instead of being overwritten.
+An "open" session is a row with check_in set and check_out still NULL.
 """
 import os
 import psycopg2
@@ -27,10 +20,6 @@ DATABASE_URL = os.environ.get(
     "postgresql://postgres:postgres@localhost:5432/attendance"
 )
 
-# pandas' read_sql_query wants a SQLAlchemy engine (or a sqlite3 connection)
-# for full compatibility -- a raw psycopg2 connection works but throws a
-# UserWarning. This engine is used only for the two pandas read queries
-# below; everything else still uses plain psycopg2.
 _engine = create_engine(DATABASE_URL)
 
 
@@ -74,11 +63,6 @@ def init_db():
     c.execute("ALTER TABLE visitors ADD COLUMN IF NOT EXISTS photo_path TEXT")
     conn.commit()
 
-    # Migration: turn visitors from single-sighting rows into check-in/
-    # check-out SESSIONS. A visitor's face embedding is stored only for
-    # the duration of their open session (used to recognize them again
-    # at check-out), matched the same way an employee is -- just against
-    # a separate, temporary pool instead of the permanent employee table.
     extra_visitor_cols = {
         "embedding": "BYTEA",
         "camera_in": "TEXT DEFAULT 'main gate in'",
@@ -89,15 +73,9 @@ def init_db():
     for col, coltype in extra_visitor_cols.items():
         c.execute(f"ALTER TABLE visitors ADD COLUMN IF NOT EXISTS {col} {coltype}")
     conn.commit()
-    # Backfill: old rows only had detected_at -- treat that as their check_in
-    # so existing data still shows up sensibly in the new session view.
     c.execute("UPDATE visitors SET check_in = detected_at WHERE check_in IS NULL")
     conn.commit()
 
-    # Extended employee profile fields -- placeholders for data that, in
-    # production, would sync automatically from an HR system by employee
-    # ID. Postgres supports "ADD COLUMN IF NOT EXISTS" directly, so this
-    # migration is simpler than the SQLite version's PRAGMA-based check.
     extra_emp_cols = {
         "national_id": "TEXT",
         "job_title": "TEXT",
@@ -137,12 +115,6 @@ def add_employee(name, department, embedding, shift_start="09:00", shift_end="17
 
 
 def update_employee_profile(employee_id, **fields):
-    """
-    Updates any subset of an employee's profile fields. In production,
-    this is the function an HR-system integration would call automatically
-    (looked up by employee ID) -- for now it's called manually from the
-    dashboard.
-    """
     allowed = {"name", "department", "shift_start", "shift_end", "national_id", "job_title",
                "gender", "religion", "marital_status", "birth_date", "address", "employee_status"}
     updates = {k: v for k, v in fields.items() if k in allowed}
@@ -180,50 +152,82 @@ def get_all_employees():
     return employees
 
 
-def _today_row(employee_id, today):
+def get_open_session(employee_id):
+    """
+    Returns (session_id, check_in_time) for the most recent OPEN session
+    today (check_in set, check_out still NULL) -- or (None, None) if the
+    employee has no open session right now. This replaces the old
+    "one row per employee per day" model: an employee can have several
+    CLOSED sessions today plus at most one OPEN one.
+    """
+    today = date.today().isoformat()
     conn = get_conn()
     c = conn.cursor()
     c.execute(
-        "SELECT id, check_in, check_out FROM attendance WHERE employee_id=%s AND date=%s",
+        "SELECT id, check_in FROM attendance "
+        "WHERE employee_id=%s AND date=%s AND check_out IS NULL "
+        "ORDER BY id DESC LIMIT 1",
         (employee_id, today)
     )
     row = c.fetchone()
     c.close()
     conn.close()
-    return row
+    if row is None:
+        return None, None
+    return row[0], row[1]
 
 
 def get_today_status(employee_id):
-    """Public wrapper: returns (check_in_str_or_None, check_out_str_or_None) for today."""
-    today = date.today().isoformat()
-    row = _today_row(employee_id, today)
-    if row is None:
-        return None, None
-    return row[1], row[2]
+    """
+    Public wrapper, kept for compatibility with existing kiosk logic.
+    Returns (check_in_str_or_None, check_out_str_or_None) describing the
+    CURRENT open session only. check_out is always None here by
+    definition (a session with check_out set is closed, not open) --
+    kiosk logic that checks "if check_out_time is not None" simply never
+    triggers anymore, which is intentional now that multiple sessions
+    per day are allowed.
+    """
+    _, check_in_time = get_open_session(employee_id)
+    return check_in_time, None
 
 
 def log_check_in(employee_id, shift_start="09:00", grace_minutes=10):
-    """Logs a check-in for today if one doesn't already exist. Returns a status string."""
+    """
+    Starts a NEW session for today, as long as no session is currently
+    open. Only the FIRST session of the day gets an on_time/late status
+    computed against the shift start -- any later session that day
+    (e.g. returning from lunch) gets status "returned" instead, since
+    comparing a midday re-entry against the morning shift start doesn't
+    mean anything.
+    """
     today = date.today().isoformat()
     now = datetime.now()
-    existing = _today_row(employee_id, today)
-    if existing and existing[1]:
+
+    open_session_id, _ = get_open_session(employee_id)
+    if open_session_id is not None:
         return "already_checked_in"
 
-    sh, sm = map(int, shift_start.split(":"))
-    shift_dt = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
-    late_cutoff = shift_dt.timestamp() + grace_minutes * 60
-    status = "on_time" if now.timestamp() <= late_cutoff else "late"
     conn = get_conn()
     c = conn.cursor()
-    if existing:
-        c.execute("UPDATE attendance SET check_in=%s, status=%s WHERE id=%s",
-                   (now.strftime("%H:%M:%S"), status, existing[0]))
+
+    c.execute(
+        "SELECT COUNT(*) FROM attendance WHERE employee_id=%s AND date=%s",
+        (employee_id, today)
+    )
+    sessions_today = c.fetchone()[0]
+
+    if sessions_today == 0:
+        sh, sm = map(int, shift_start.split(":"))
+        shift_dt = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        late_cutoff = shift_dt.timestamp() + grace_minutes * 60
+        status = "on_time" if now.timestamp() <= late_cutoff else "late"
     else:
-        c.execute(
-            "INSERT INTO attendance (employee_id, date, check_in, status) VALUES (%s, %s, %s, %s)",
-            (employee_id, today, now.strftime("%H:%M:%S"), status)
-        )
+        status = "returned"
+
+    c.execute(
+        "INSERT INTO attendance (employee_id, date, check_in, status) VALUES (%s, %s, %s, %s)",
+        (employee_id, today, now.strftime("%H:%M:%S"), status)
+    )
     conn.commit()
     c.close()
     conn.close()
@@ -231,15 +235,15 @@ def log_check_in(employee_id, shift_start="09:00", grace_minutes=10):
 
 
 def log_check_out(employee_id):
-    today = date.today().isoformat()
+    """Closes the current open session, if one exists."""
     now = datetime.now()
-    existing = _today_row(employee_id, today)
-    if not existing or not existing[1]:
+    open_session_id, _ = get_open_session(employee_id)
+    if open_session_id is None:
         return "no_check_in_found"
     conn = get_conn()
     c = conn.cursor()
     c.execute("UPDATE attendance SET check_out=%s WHERE id=%s",
-              (now.strftime("%H:%M:%S"), existing[0]))
+              (now.strftime("%H:%M:%S"), open_session_id))
     conn.commit()
     c.close()
     conn.close()
@@ -247,6 +251,12 @@ def log_check_out(employee_id):
 
 
 def get_attendance_df():
+    """
+    Returns every attendance SESSION as its own row (no longer collapsed
+    to one row per employee per day). With the new log_check_in behavior,
+    a day with multiple check-in/out cycles now naturally produces
+    multiple rows here.
+    """
     df = pd.read_sql_query("""
         SELECT e.id AS employee_id, e.name, e.department, a.date,
                a.check_in, a.check_out, a.status
@@ -268,6 +278,31 @@ def get_attendance_df():
     return df
 
 
+def get_daily_hours_summary(start_date=None, end_date=None):
+    """
+    Groups attendance sessions by employee + date and sums work_hours
+    across all that day's sessions -- feeds the new summary table above
+    the raw logs table. Days with no completed (check_in + check_out)
+    session show None rather than 0, via min_count=1.
+    """
+    df = get_attendance_df()
+    if df.empty:
+        return df
+    if start_date:
+        df = df[df["date"] >= start_date]
+    if end_date:
+        df = df[df["date"] <= end_date]
+    if df.empty:
+        return df
+
+    grouped = df.groupby(
+        ["employee_id", "name", "department", "date"], as_index=False
+    )["work_hours"].sum(min_count=1)
+    grouped = grouped.rename(columns={"work_hours": "total_work_hours"})
+    grouped = grouped.sort_values(["date", "name"], ascending=[False, True])
+    return grouped
+
+
 def get_today_summary():
     """Returns (total_employees, attended_today, absent_today)."""
     today = date.today().isoformat()
@@ -286,14 +321,6 @@ def get_today_summary():
 
 
 def delete_employee(employee_id):
-    """
-    Deletes an employee AND their attendance history. This is a hard,
-    permanent delete -- there's no undo. Attendance rows are removed too
-    (rather than left orphaned), since an orphaned row would silently
-    disappear from get_attendance_df() anyway (its JOIN would just drop
-    it), which is worse than being upfront that deleting an employee
-    deletes their history.
-    """
     conn = get_conn()
     c = conn.cursor()
     c.execute("DELETE FROM attendance WHERE employee_id=%s", (employee_id,))
@@ -304,20 +331,8 @@ def delete_employee(employee_id):
 
 
 def get_open_visitor_sessions():
-    """
-    Returns currently checked-in visitors whose sessions are still open.
-
-    Each result contains:
-      - id: visitor session ID
-      - embedding: the stored float32 face embedding
-      - check_in: the visitor check-in time
-
-    The kiosk needs check_in to decide whether enough time has passed
-    before treating another sighting as a visitor check-out.
-    """
     conn = get_conn()
     c = conn.cursor()
-
     c.execute("""
         SELECT id, embedding, check_in
         FROM visitors
@@ -325,18 +340,11 @@ def get_open_visitor_sessions():
           AND check_out IS NULL
           AND embedding IS NOT NULL
     """)
-
     rows = c.fetchall()
-
     c.close()
     conn.close()
-
     return [
-        {
-            "id": row[0],
-            "embedding": np.frombuffer(bytes(row[1]), dtype=np.float32),
-            "check_in": row[2],
-        }
+        {"id": row[0], "embedding": np.frombuffer(bytes(row[1]), dtype=np.float32), "check_in": row[2]}
         for row in rows
     ]
 
@@ -359,7 +367,6 @@ def log_visitor_check_in(embedding, camera="main gate in", best_similarity=None,
 
 
 def log_visitor_check_out(session_id, camera="main gate out"):
-    """Closes an open visitor session. Returns the duration in minutes."""
     now = datetime.now()
     conn = get_conn()
     c = conn.cursor()
@@ -402,7 +409,7 @@ def get_visitors_df():
 def get_visitor_count_this_month():
     conn = get_conn()
     c = conn.cursor()
-    month_prefix = date.today().isoformat()[:7]  # 'YYYY-MM'
+    month_prefix = date.today().isoformat()[:7]
     c.execute("SELECT COUNT(*) FROM visitors WHERE date LIKE %s", (f"{month_prefix}%",))
     count = c.fetchone()[0]
     c.close()
@@ -418,7 +425,6 @@ VISITOR_PHOTOS_BUCKET = "visitor-photos"
 
 
 def upload_visitor_photo(image_bytes: bytes, session_id_hint: str) -> str | None:
-    """Uploads a visitor photo to Supabase Storage, returns the storage path (not a public URL, bucket is private)."""
     if _supabase is None:
         return None
     path = f"{date.today().isoformat()}/{session_id_hint}_{datetime.now().strftime('%H%M%S')}.jpg"
@@ -429,7 +435,6 @@ def upload_visitor_photo(image_bytes: bytes, session_id_hint: str) -> str | None
 
 
 def get_visitor_photo_path(visitor_id):
-    """Looks up the stored Supabase Storage path for a visitor's photo, if one was saved."""
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT photo_path FROM visitors WHERE id=%s", (visitor_id,))
@@ -440,7 +445,6 @@ def get_visitor_photo_path(visitor_id):
 
 
 def get_visitor_photo_url(photo_path, expires_in=60):
-    """Generates a short-lived signed URL for a private-bucket photo. Returns None if storage isn't configured."""
     if _supabase is None:
         return None
     signed = _supabase.storage.from_(VISITOR_PHOTOS_BUCKET).create_signed_url(photo_path, expires_in)

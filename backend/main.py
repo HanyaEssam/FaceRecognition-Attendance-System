@@ -31,6 +31,7 @@ from db import (
     delete_employee,
     get_all_employees,
     get_attendance_df,
+    get_daily_hours_summary,
     get_open_visitor_sessions,
     get_today_status,
     get_today_summary,
@@ -392,7 +393,12 @@ def _kiosk_process_employee(
             "employee_name": employee_name,
         }
 
-    check_in_time, check_out_time = get_today_status(employee_id)
+    # check_out is intentionally not used here anymore: get_today_status
+    # now describes the current OPEN session only, and an open session by
+    # definition has no check_out value. Multiple check-in/check-out
+    # cycles per day are allowed, so there is no "already done for today"
+    # state to guard against anymore.
+    check_in_time, _ = get_today_status(employee_id)
 
     # Dedicated entrance camera
     if direction == "in":
@@ -427,13 +433,6 @@ def _kiosk_process_employee(
                 "message": "Employee has not checked in today.",
             }
 
-        if check_out_time is not None:
-            return {
-                "result": "already_done",
-                "box": box,
-                "employee_name": employee_name,
-            }
-
         status = log_check_out(employee_id)
         _mark_processed("emp", employee_id, direction)
 
@@ -459,13 +458,6 @@ def _kiosk_process_employee(
             "status": status,
             "employee_name": employee_name,
             "similarity": float(score),
-        }
-
-    if check_out_time is not None:
-        return {
-            "result": "already_done",
-            "box": box,
-            "employee_name": employee_name,
         }
 
     elapsed_minutes = _minutes_since(check_in_time)
@@ -728,6 +720,24 @@ def attendance(
     return df.to_dict(orient="records")
 
 
+@router.get("/attendance/summary")
+def attendance_summary(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    department: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    df = get_daily_hours_summary(start_date, end_date)
+    if df.empty:
+        return []
+    if department:
+        df = df[df["department"] == department]
+    if search:
+        df = df[df["name"].str.contains(search, case=False, na=False)]
+    df = df.astype(object).where(df.notnull(), None)
+    return df.to_dict(orient="records")
+
+
 @router.get("/attendance/export/csv")
 def export_csv():
     df = get_attendance_df()
@@ -846,9 +856,11 @@ def dashboard_stats():
     }
 
     if not df.empty:
-        total = len(df)
-        stats["on_time_pct"] = round((df["status"] == "on_time").sum() / total * 100)
-        stats["late_pct"] = round((df["status"] == "late").sum() / total * 100)
+        punctuality_df = df[df["status"].isin(["on_time", "late"])]
+        total_punctuality = len(punctuality_df)
+        if total_punctuality > 0:
+            stats["on_time_pct"] = round((punctuality_df["status"] == "on_time").sum() / total_punctuality * 100)
+            stats["late_pct"] = round((punctuality_df["status"] == "late").sum() / total_punctuality * 100)
 
         top_attendees = df.groupby("name").size().sort_values(ascending=False).head(10)
         stats["top_attendees"] = [{"name": k, "count": int(v)} for k, v in top_attendees.items()]

@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
-import { getAttendance, exportCsvUrl, exportXlsxUrl } from "../api";
+import { getAttendance, getAttendanceSummary, exportCsvUrl, exportXlsxUrl } from "../api";
 import { Search, Download, Printer, RotateCcw } from "lucide-react";
 
 function AttendanceLog() {
   const [records, setRecords] = useState([]);
+  const [summary, setSummary] = useState([]);
   const [search, setSearch] = useState("");
   const [department, setDepartment] = useState("");
   const [status, setStatus] = useState("");
-  const [startDate, setStartDate] = useState(new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+  const [startDate, setStartDate] = useState(new Date(Date.now()).toISOString().slice(0, 10));
   const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 10));
 
   const load = () => {
@@ -15,6 +16,11 @@ function AttendanceLog() {
       start_date: startDate, end_date: endDate,
       search: search || undefined, department: department || undefined, status: status || undefined,
     }).then(setRecords);
+
+    getAttendanceSummary({
+      start_date: startDate, end_date: endDate,
+      search: search || undefined, department: department || undefined,
+    }).then(setSummary);
   };
 
   const clearFilters = () => {
@@ -24,8 +30,9 @@ function AttendanceLog() {
     setStartDate("");
     setEndDate("");
     getAttendance({}).then(setRecords);
+    getAttendanceSummary({}).then(setSummary);
   };
-  
+
   useEffect(() => { load(); }, []);
 
   const departments = [...new Set(records.map((r) => r.department).filter(Boolean))];
@@ -35,8 +42,7 @@ function AttendanceLog() {
     <div>
       {/* Top Section: Filters (Left) and Actions (Right) */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "16px", marginBottom: "16px" }}>
-        
-        {/* Filters Group */}
+
         <div>
           <div className="filter-row">
             <label>Start <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></label>
@@ -65,7 +71,6 @@ function AttendanceLog() {
           </div>
         </div>
 
-        {/* Actions Group (Aligned Right) */}
         <div className="action-row" style={{ margin: 0 }}>
           <a className="btn-secondary" href={exportCsvUrl()}>
             <Download size={16} /> Download CSV
@@ -79,7 +84,28 @@ function AttendanceLog() {
         </div>
       </div>
 
-      {/* Data Table */}
+      {/* Daily Hours Summary Table */}
+      <h3 style={{ marginBottom: 8 }}>Daily Hours Summary</h3>
+      <table className="data-table" style={{ marginBottom: 24 }}>
+        <thead>
+          <tr>
+            <th>Employee ID</th><th>Employee Name</th><th>Department</th>
+            <th>Date</th><th>Total Working Hours</th>
+          </tr>
+        </thead>
+        <tbody>
+          {summary.map((s, i) => (
+            <tr key={i}>
+              <td>{s.employee_id}</td><td>{s.name}</td><td>{s.department}</td>
+              <td>{s.date}</td><td>{s.total_work_hours ?? "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {summary.length === 0 && <p style={{ marginBottom: 24, color: "var(--text-muted)" }}>No summary data for this filter.</p>}
+
+      {/* All Sessions / Logs Table */}
+      <h3 style={{ marginBottom: 8 }}>All Check-In / Check-Out Logs</h3>
       <table className="data-table">
         <thead>
           <tr>
@@ -99,7 +125,7 @@ function AttendanceLog() {
           ))}
         </tbody>
       </table>
-      
+
       {records.length === 0 && <p style={{ marginTop: "16px", color: "var(--text-muted)" }}>No attendance records for this filter.</p>}
     </div>
   );
