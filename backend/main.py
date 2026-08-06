@@ -35,7 +35,7 @@ from db import (
     get_open_visitor_sessions,
     get_today_status,
     get_today_summary,
-    get_visitor_count_this_month,
+    get_visitor_count_today,
     get_visitors_df,
     init_db,
     log_check_in,
@@ -786,7 +786,7 @@ def visitors(
     return {
         "records": df.to_dict(orient="records"),
         "total_all_time": len(all_visitors),
-        "count_this_month": get_visitor_count_this_month(),
+        "count_today": get_visitor_count_today(),
     }
 
 
@@ -846,7 +846,7 @@ def dashboard_stats():
         "total_employees": total_employees,
         "attended_today": attended_today,
         "absent_today": absent_today,
-        "visitors_this_month": get_visitor_count_this_month(),
+        "visitors_today": get_visitor_count_today(),
         "total_visitors_all_time": len(visitors_df),
         "on_time_pct": 0,
         "late_pct": 0,

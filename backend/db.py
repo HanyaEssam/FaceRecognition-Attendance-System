@@ -6,9 +6,16 @@ than reusing/overwriting a single row per employee per day. This allows
 an employee to check in/out multiple times in a day (e.g. lunch break),
 with every attempt preserved as its own row instead of being overwritten.
 An "open" session is a row with check_in set and check_out still NULL.
+
+Connections are pooled (psycopg2.pool.SimpleConnectionPool) rather than
+opened fresh per query -- against a remote Postgres (Supabase), each new
+connection pays a full TCP + TLS handshake, which adds up fast when a
+single check-in request can trigger 3-4 separate queries. Pooling reuses
+already-open connections instead.
 """
 import os
 import psycopg2
+import psycopg2.pool
 import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine
@@ -22,9 +29,19 @@ DATABASE_URL = os.environ.get(
 
 _engine = create_engine(DATABASE_URL)
 
+# minconn=1, maxconn=10 -- 10 is comfortably above what a single-process
+# Railway deployment will need concurrently; raise it only if you move to
+# multiple worker processes.
+_pool = psycopg2.pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+    return _pool.getconn()
+
+
+def release_conn(conn):
+    """Returns a connection to the pool instead of closing the socket."""
+    _pool.putconn(conn)
 
 
 def init_db():
@@ -91,7 +108,7 @@ def init_db():
     conn.commit()
 
     c.close()
-    conn.close()
+    release_conn(conn)
 
 
 def add_employee(name, department, embedding, shift_start="09:00", shift_end="17:00",
@@ -111,7 +128,7 @@ def add_employee(name, department, embedding, shift_start="09:00", shift_end="17
     )
     conn.commit()
     c.close()
-    conn.close()
+    release_conn(conn)
 
 
 def update_employee_profile(employee_id, **fields):
@@ -126,7 +143,7 @@ def update_employee_profile(employee_id, **fields):
     c.execute(f"UPDATE employees SET {set_clause} WHERE id=%s", (*updates.values(), employee_id))
     conn.commit()
     c.close()
-    conn.close()
+    release_conn(conn)
 
 
 def get_all_employees():
@@ -138,7 +155,7 @@ def get_all_employees():
                  FROM employees""")
     rows = c.fetchall()
     c.close()
-    conn.close()
+    release_conn(conn)
     employees = []
     for r in rows:
         emb = np.frombuffer(bytes(r[5]), dtype=np.float32)
@@ -171,7 +188,7 @@ def get_open_session(employee_id):
     )
     row = c.fetchone()
     c.close()
-    conn.close()
+    release_conn(conn)
     if row is None:
         return None, None
     return row[0], row[1]
@@ -230,7 +247,7 @@ def log_check_in(employee_id, shift_start="09:00", grace_minutes=10):
     )
     conn.commit()
     c.close()
-    conn.close()
+    release_conn(conn)
     return status
 
 
@@ -246,7 +263,7 @@ def log_check_out(employee_id):
               (now.strftime("%H:%M:%S"), open_session_id))
     conn.commit()
     c.close()
-    conn.close()
+    release_conn(conn)
     return "checked_out"
 
 
@@ -316,7 +333,7 @@ def get_today_summary():
     )
     attended = c.fetchone()[0]
     c.close()
-    conn.close()
+    release_conn(conn)
     return total, attended, max(total - attended, 0)
 
 
@@ -327,7 +344,7 @@ def delete_employee(employee_id):
     c.execute("DELETE FROM employees WHERE id=%s", (employee_id,))
     conn.commit()
     c.close()
-    conn.close()
+    release_conn(conn)
 
 
 def get_open_visitor_sessions():
@@ -342,7 +359,7 @@ def get_open_visitor_sessions():
     """)
     rows = c.fetchall()
     c.close()
-    conn.close()
+    release_conn(conn)
     return [
         {"id": row[0], "embedding": np.frombuffer(bytes(row[1]), dtype=np.float32), "check_in": row[2]}
         for row in rows
@@ -363,7 +380,7 @@ def log_visitor_check_in(embedding, camera="main gate in", best_similarity=None,
     )
     conn.commit()
     c.close()
-    conn.close()
+    release_conn(conn)
 
 
 def log_visitor_check_out(session_id, camera="main gate out"):
@@ -374,7 +391,7 @@ def log_visitor_check_out(session_id, camera="main gate out"):
     row = c.fetchone()
     if row is None or row[0] is None:
         c.close()
-        conn.close()
+        release_conn(conn)
         return None
 
     check_in_time = datetime.strptime(row[0], "%H:%M:%S")
@@ -384,7 +401,7 @@ def log_visitor_check_out(session_id, camera="main gate out"):
               (now.strftime("%H:%M:%S"), camera, session_id))
     conn.commit()
     c.close()
-    conn.close()
+    release_conn(conn)
     return duration_minutes
 
 
@@ -406,14 +423,14 @@ def get_visitors_df():
     return df
 
 
-def get_visitor_count_this_month():
+def get_visitor_count_today():
     conn = get_conn()
     c = conn.cursor()
-    month_prefix = date.today().isoformat()[:7]
-    c.execute("SELECT COUNT(*) FROM visitors WHERE date LIKE %s", (f"{month_prefix}%",))
+    today = date.today().isoformat()
+    c.execute("SELECT COUNT(*) FROM visitors WHERE date=%s", (today,))
     count = c.fetchone()[0]
     c.close()
-    conn.close()
+    release_conn(conn)
     return count
 
 
@@ -440,7 +457,7 @@ def get_visitor_photo_path(visitor_id):
     c.execute("SELECT photo_path FROM visitors WHERE id=%s", (visitor_id,))
     row = c.fetchone()
     c.close()
-    conn.close()
+    release_conn(conn)
     return row[0] if row else None
 
 

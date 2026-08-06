@@ -11,7 +11,7 @@ function Visitors() {
   const [data, setData] = useState(null);
   const [loadingPhotoId, setLoadingPhotoId] = useState(null);
   const [startDate, setStartDate] = useState(
-    new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10)
+    new Date(Date.now()).toISOString().slice(0, 10)
   );
   const [endDate, setEndDate] = useState(
     new Date().toISOString().slice(0, 10)
@@ -72,8 +72,8 @@ function Visitors() {
 
       <div className="stat-grid">
         <div className="stat-card tone-info">
-          <div className="stat-label">VISITORS THIS MONTH</div>
-          <div className="stat-value">{data.count_this_month}</div>
+          <div className="stat-label">VISITORS TODAY</div>
+          <div className="stat-value">{data.count_today}</div>
         </div>
         <div className="stat-card tone-accent">
           <div className="stat-label">TOTAL VISITORS (ALL-TIME)</div>

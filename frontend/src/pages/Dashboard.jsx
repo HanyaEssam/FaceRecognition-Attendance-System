@@ -56,7 +56,7 @@ function Dashboard() {
         <StatCard label="Total employees" value={stats.total_employees} icon={Users} tone="accent" />
         <StatCard label="Attended today" value={stats.attended_today} icon={UserCheck} tone="success" />
         <StatCard label="Absent today" value={stats.absent_today} icon={UserX} tone="danger" />
-        <StatCard label="Visitors this month" value={stats.visitors_this_month} icon={Contact} tone="teal" />
+        <StatCard label="Visitors today" value={stats.visitors_today} icon={Contact} tone="teal" />
       </div>
 
       <div className="stat-grid" style={{ marginTop: 14 }}>
